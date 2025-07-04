@@ -1,0 +1,93 @@
+@startuml
+actor User
+participant "__main__.py" as Main
+participant "simple_parsing.parse" as Parser
+participant "RunConfig (extends TrainConfig)" as RC
+participant "load_artifacts" as Loader
+participant "AutoModel/AutoModelForCausalLM" as HFModel
+participant "Datasets API" as HFDS
+participant "MemmapDataset" as MMD
+participant "chunk_and_tokenize" as Cat
+participant "Trainer.__init__" as TrainerInit
+
+== 1. CLI 和配置解析 ==
+User -> Main: python -m sparsify EleutherAI/pythia-160m [dataset]
+activate Main
+Main -> Parser: parse(RunConfig)
+activate Parser
+Parser -> Main: args: RunConfig(model,dataset,split,ctx_len,sae,batch_size,grad_acc_steps,…)
+deactivate Parser
+
+== 2. DDP 环境 ==
+Main -> Main: local_rank = ENV["LOCAL_RANK"]
+alt DDP 模式
+  Main -> dist: init_process_group("nccl",…)
+  Main -> Main: torch.cuda.set_device(rank)
+  Main -> Main: print DDP 信息
+else 单卡
+  Main -> Main: rank = 0
+end
+
+== 3. 加载模型与数据 ==
+Main -> Loader: load_artifacts(args,rank)
+activate Loader
+
+Loader -> HFModel: from_pretrained(model,device_map,quantization_config,revision,torch_dtype,token)
+activate HFModel
+HFModel --> Loader: model instance
+deactivate HFModel
+
+alt dataset ends with ".bin"
+  Loader -> MMD: MemmapDataset(path,ctx_len,max_examples)
+  activate MMD
+  MMD --> Loader: mmap array (reshaped & sliced)
+  deactivate MMD
+else HuggingFace 数据集
+  Loader -> HFDS: load_dataset(dataset,split,trust_remote_code=True)
+  activate HFDS
+  HFDS --> Loader: raw Dataset
+  deactivate HFDS
+
+  alt 需要分词
+    Loader -> Cat: chunk_and_tokenize(...)
+    activate Cat
+    Cat --> Loader: tokenized Dataset
+    deactivate Cat
+  else 已有 input_ids
+    Loader -> Loader: skip tokenization
+  end
+
+  Loader -> Loader: shuffle(seed)
+  Loader -> Loader: with_format("torch")
+  alt max_examples 限制
+    Loader -> Loader: select(range(max_examples))
+  end
+end
+
+Loader --> Main: (model,dataset)
+deactivate Loader
+
+alt DDP 模式
+  Main -> dist: barrier()
+  Main -> Main: dataset = dataset.shard(world_size,rank)
+  Main -> Main: drop 多余样本
+end
+
+Main -> Main: print 训练信息(model.dtype,dataset)
+
+== 4. Trainer 初始化 ==
+Main -> TrainerInit: Trainer(args,dataset,model)
+activate TrainerInit
+TrainerInit --> Main: trainer
+deactivate TrainerInit
+
+== 5. 恢复/微调 ==
+alt args.resume == true
+  Main -> trainer: load_state(...)
+else args.finetune != null
+  Main -> load_model: load SAE 权重
+end
+
+Main -> trainer: fit()
+deactivate Main
+@enduml

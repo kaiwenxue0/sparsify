@@ -252,6 +252,8 @@ class Trainer:
                     project=os.environ.get("WANDB_PROJECT", "sparsify"),
                     config=asdict(self.cfg),
                     save_code=True,
+                    mode=os.environ.get("WANDB_UPLOAD", "online"),
+                    dir=os.path.join("wandb", self.cfg.run_name)
                 )
             except (AttributeError, ImportError):
                 print("Weights & Biases not available, skipping logging.")
@@ -266,6 +268,7 @@ class Trainer:
         print(f"Number of model parameters: {num_model_params:_}")
 
         num_batches = len(self.dataset) // self.cfg.batch_size
+        
         if self.global_step > 0:
             assert hasattr(self.dataset, "select"), "Dataset must implement `select`"
 

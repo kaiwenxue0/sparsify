@@ -1,0 +1,105 @@
+@startuml
+participant Trainer
+participant Model
+participant "Hook Func" as Hook
+participant SparseCoder
+participant "Torch Distributed" as Dist
+participant DDP
+
+== 初始化 ==
+Trainer -> Trainer: set_float32_matmul_precision("high")
+Trainer -> Trainer: model.requires_grad_(False)
+alt log_to_wandb && rank_zero
+  Trainer -> Trainer: wandb.init(...)
+end
+Trainer -> Trainer: compute num_sae_params, num_model_params
+Trainer -> Trainer: print 参数量
+Trainer -> Trainer: slice dataset if global_step > 0
+Trainer -> Trainer: 创建 DataLoader(ds, batch_size, shuffle=False)
+Trainer -> Trainer: 初始化 tqdm(total=num_batches, initial=global_step)
+Trainer -> Trainer: 初始化 did_fire, acc_steps, denom, num_tokens_in_step, avg_* 统计
+
+== 主训练循环 ==
+loop epoch 未结束
+  loop 对每个 batch
+    Trainer -> Trainer: x = batch["input_ids"].to(device)
+    alt 首次 batch
+      Trainer -> SAEs: wrap SAEs 为 DDP 或保持原样
+    end
+
+    alt loss_fn == "kl"
+      Trainer -> Model: clean_probs = model(x).logits.softmax()
+    else
+      Trainer -> Trainer: clean_probs = None
+    end
+
+    group 注册 hook
+      Trainer -> Hook: handles = [mod.register_forward_hook(hook) for mod in hookpoints]
+    end
+
+    group 前向+反向
+      alt loss_fn == "ce"
+        Trainer -> Model: ce = model(x, labels=x).loss
+        Trainer -> Trainer: ce.div(acc_steps).backward()
+        Trainer -> Trainer: avg_ce += maybe_all_reduce(ce)/denom
+      else loss_fn == "kl"
+        Trainer -> Model: dirty_lps = model(x).logits.log_softmax()
+        Trainer -> Trainer: kl = -sum(clean_probs*dirty_lps).mean()
+        Trainer -> Trainer: kl.div(acc_steps).backward()
+        Trainer -> Trainer: avg_kl += maybe_all_reduce(kl)/denom
+      else loss_fn == "fvu"
+        Trainer -> Model: model(x)  '<color red> hook 中处理 SAE 前向、反向 </color>
+        Trainer -> Trainer: avg_losses = avg_fvu
+      end
+    end
+
+    group 移除 hook
+      Trainer -> Trainer: for handle in handles: handle.remove()
+    end
+
+    Trainer -> Trainer: step, substep = divmod(global_step+1, grad_acc_steps)
+    alt substep == 0
+      group 优化器和调度器
+        alt normalize_decoder && not transcode
+          Trainer -> Trainer: for each sae: remove_gradient_parallel_to_decoder_directions()
+        end
+        Trainer -> Optimizer: for opt in optimizers: opt.step(); opt.zero_grad()
+        Trainer -> Scheduler: for sch in lr_schedulers: sch.step()
+        Trainer -> Trainer: 更新 k 并赋值给各 SAE.cfg.k
+      end
+
+      group 更新 dead_feature 和 did_fire
+        Trainer -> Trainer: with no_grad: 更新 num_tokens_since_fired，清零 did_fire
+      end
+
+      alt (step+1) % save_every == 0
+        Trainer -> Trainer: save checkpoint
+        alt save_best
+          Trainer -> Trainer: save_best(avg_losses)
+        end
+      end
+
+      alt log_to_wandb && (step+1)%wandb_log_frequency==0
+        Trainer -> Trainer: 收集 dead_pct/fvu/auxk/multi_topk
+        alt distribute_modules
+          Dist -> Trainer: gather_object(info)
+        end
+        alt rank_zero
+          Trainer -> Trainer: info["k"]=k; wandb.log(info, step)
+        end
+      end
+
+      Trainer -> Trainer: 清空 avg_*、avg_ce、avg_kl
+    end
+
+    Trainer -> Trainer: global_step += 1; pbar.update()
+  end
+end
+
+== 收尾 ==
+Trainer -> Trainer: save final checkpoint
+alt save_best
+  Trainer -> Trainer: save_best(avg_losses)
+end
+Trainer -> Trainer: pbar.close()
+@enduml
