@@ -109,7 +109,7 @@ class TrainConfig(Serializable):
 
     log_to_wandb: bool = True
     run_name: str | None = None
-    wandb_log_frequency: int = 1
+    wandb_log_frequency: int = 10
 
     save_dir: str = "checkpoints"
 
