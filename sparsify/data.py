@@ -9,7 +9,6 @@ import torch
 from datasets import Dataset, DatasetDict
 from torch.utils.data import Dataset as TorchDataset
 from transformers import PreTrainedTokenizerBase
-
 T = TypeVar("T", bound=Union[Dataset, DatasetDict])
 
 
@@ -23,6 +22,7 @@ def chunk_and_tokenize(
     max_seq_len: int = 2048,
     return_final_batch: bool = False,
     load_from_cache_file: bool = True,
+    cache_dir: str = "/path/to/your/cache_dir/tokenized.arrow",
 ) -> T:
     """Perform GPT-style chunking and tokenization on a dataset.
 
@@ -96,6 +96,7 @@ def chunk_and_tokenize(
         num_proc=num_proc,
         remove_columns=get_columns_all_equal(data),
         load_from_cache_file=load_from_cache_file,
+        cache_file_name=cache_dir,
     )
     return data.with_format(format, columns=["input_ids"])
 
@@ -129,7 +130,7 @@ class MemmapDataset(TorchDataset):
         self,
         data_path: str,
         ctx_len: int,
-        max_examples: int | None = None,
+        max_examples: Union[int] = None,
         dtype=np.uint16,
     ):
         mmap = np.memmap(data_path, dtype=dtype, mode="r").reshape(-1, ctx_len)
