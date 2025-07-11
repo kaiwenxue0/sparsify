@@ -101,19 +101,26 @@ def load_artifacts(
         dataset = MemmapDataset(args.dataset, args.ctx_len, args.max_examples)
     else:
         # For Huggingface datasets
-        try:
+        if "tiny_shakespeare" in args.dataset:
             dataset = load_dataset(
-                args.dataset,
-                split=args.split,
-                # TODO: Maybe set this to False by default? But RPJ requires it.
-                trust_remote_code=True,
+                "text",
+                data_files={"train": os.path.join(args.dataset, "tinyshakespeare.txt")},
+                split="train"
             )
-        except ValueError as e:
-            # Automatically use load_from_disk if appropriate
-            if "load_from_disk" in str(e):
-                dataset = Dataset.load_from_disk(args.dataset, keep_in_memory=False)
-            else:
-                raise e
+        else:
+            try:
+                dataset = load_dataset(
+                    args.dataset,
+                    split=args.split,
+                    # TODO: Maybe set this to False by default? But RPJ requires it.
+                    trust_remote_code=True,
+                )
+            except ValueError as e:
+                # Automatically use load_from_disk if appropriate
+                if "load_from_disk" in str(e):
+                    dataset = Dataset.load_from_disk(args.dataset, keep_in_memory=False)
+                else:
+                    raise e
 
         assert isinstance(dataset, Dataset)
         if "input_ids" not in dataset.column_names:
