@@ -253,17 +253,6 @@ class Trainer:
         fh.setFormatter(fmt)
         logger.addHandler(fh)
 
-        # logger
-        save_path = os.path.join(self.cfg.save_dir, self.cfg.run_name or "unnamed")
-        os.makedirs(save_path, exist_ok=True)
-        log_file_path = os.path.join(save_path, "train.log")
-        logger = logging.getLogger("train_logger")
-        logger.setLevel(logging.INFO)
-        fh = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
-        fh.setLevel(logging.INFO)
-        fmt = logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
 
         wandb = None
         if self.cfg.log_to_wandb and rank_zero:
