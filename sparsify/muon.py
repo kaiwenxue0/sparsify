@@ -6,6 +6,7 @@ Modifications by Nora Belrose
 import torch
 import torch.distributed as dist
 from torch import Tensor
+from typing import Union, List
 
 
 def quintic_newtonschulz(G: Tensor, steps: int) -> Tensor:
@@ -124,7 +125,7 @@ class Muon(torch.optim.Optimizer):
                     p.mul_(1 - group["lr"] * group["weight_decay"])
 
             # These will be None / empty list if we're not using DDP
-            update_buffer: Tensor | None = group.get("update_buffer", None)
+            update_buffer: Union[Tensor] = group.get("update_buffer", None)
             update_buffer_views: list[Tensor] = group.get("update_buffer_views", [])
 
             beta = group["momentum"]
