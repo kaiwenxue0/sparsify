@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from functools import partial
 from typing import Literal
-
+from typing import Union
 from simple_parsing import Serializable, list_field
 
 
@@ -65,7 +65,7 @@ class TrainConfig(Serializable):
     optimizer: Literal["adam", "muon", "signum"] = "signum"
     """Optimizer to use."""
 
-    lr: float | None = None
+    lr: Union[float] = None
     """Base LR. If None, it is automatically chosen based on the number of latents."""
 
     lr_warmup_steps: int = 1000
@@ -104,12 +104,12 @@ class TrainConfig(Serializable):
     save_best: bool = False
     """Save the best checkpoint found for each hookpoint."""
 
-    finetune: str | None = None
+    finetune: Union[str] = None
     """Finetune the sparse coders from a pretrained checkpoint."""
 
     log_to_wandb: bool = True
-    run_name: str | None = None
-    wandb_log_frequency: int = 1
+    run_name: Union[str] = None
+    wandb_log_frequency: int = 10
 
     save_dir: str = "checkpoints"
 

@@ -4,6 +4,7 @@ from dataclasses import asdict
 from fnmatch import fnmatchcase
 from glob import glob
 from typing import Sized
+from typing import Union
 
 import torch
 import torch.distributed as dist
@@ -23,13 +24,13 @@ from .muon import Muon
 from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder
 from .utils import get_layer_list, resolve_widths, set_submodule
-
+import logging
 
 class Trainer:
     def __init__(
         self,
         cfg: TrainConfig,
-        dataset: HfDataset | MemmapDataset,
+        dataset: Union[HfDataset, MemmapDataset],
         model: PreTrainedModel,
     ):
         # Store the whole model, including any potential causal LM wrapper
@@ -89,79 +90,78 @@ class Trainer:
         assert isinstance(dataset, Sized)
         num_batches = len(dataset) // cfg.batch_size
 
-        match cfg.optimizer:
-            case "adam":
-                try:
-                    from bitsandbytes.optim import Adam8bit as Adam
+        if cfg.optimizer == "adam":
+            try:
+                from bitsandbytes.optim import Adam8bit as Adam
 
-                    print("Using 8-bit Adam from bitsandbytes")
-                except ImportError:
-                    from torch.optim import Adam
+                print("Using 8-bit Adam from bitsandbytes")
+            except ImportError:
+                from torch.optim import Adam
 
-                    print(
-                        "bitsandbytes 8-bit Adam not available, using torch.optim.Adam"
-                    )
-                    print("Run `pip install bitsandbytes` for less memory usage.")
+                print(
+                    "bitsandbytes 8-bit Adam not available, using torch.optim.Adam"
+                )
+                print("Run `pip install bitsandbytes` for less memory usage.")
 
-                pgs = [
-                    dict(
-                        params=sae.parameters(),
-                        lr=cfg.lr or 2e-4 / (sae.num_latents / (2**14)) ** 0.5,
-                    )
-                    for sae in self.saes.values()
-                ]
-                # For logging purposes
-                lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
+            pgs = [
+                dict(
+                    params=sae.parameters(),
+                    lr=cfg.lr or 2e-4 / (sae.num_latents / (2**14)) ** 0.5,
+                )
+                for sae in self.saes.values()
+            ]
+            # For logging purposes
+            lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
 
-                adam = Adam(pgs)
-                self.optimizers = [adam]
-                self.lr_schedulers = [
+            adam = Adam(pgs)
+            self.optimizers = [adam]
+            self.lr_schedulers = [
                     get_linear_schedule_with_warmup(
                         adam, cfg.lr_warmup_steps, num_batches
                     )
                 ]
-            case "muon":
-                params = {p for sae in self.saes.values() for p in sae.parameters()}
-                muon_params = {p for p in params if p.ndim >= 2}
-                lrs = [f"{cfg.lr or 2e-3:.2e}"]
+        elif cfg.optimizer == "muon":
+            params = {p for sae in self.saes.values() for p in sae.parameters()}
+            muon_params = {p for p in params if p.ndim >= 2}
+            lrs = [f"{cfg.lr or 2e-3:.2e}"]
 
-                self.optimizers = [
-                    Muon(
-                        muon_params,
-                        # Muon LR is independent of the number of latents
-                        lr=cfg.lr or 2e-3,
-                        # Muon distributes the work of the Newton-Schulz iterations
-                        # across all ranks for DDP but this doesn't make sense when
-                        # we're distributing modules across ranks
-                        ddp=not cfg.distribute_modules,
-                    ),
-                    torch.optim.Adam(params - muon_params, lr=cfg.lr or 2e-3),
-                ]
-                self.lr_schedulers = [
+            self.optimizers = [
+                Muon(
+                    muon_params,
+                    # Muon LR is independent of the number of latents
+                    lr=cfg.lr or 2e-3,
+                    # Muon distributes the work of the Newton-Schulz iterations
+                    # across all ranks for DDP but this doesn't make sense when
+                    # we're distributing modules across ranks
+                    ddp=not cfg.distribute_modules,
+                ),
+                torch.optim.Adam(params - muon_params, lr=cfg.lr or 2e-3),
+            ]
+            self.lr_schedulers = [
                     get_linear_schedule_with_warmup(self.optimizers[0], 0, num_batches),
                     get_linear_schedule_with_warmup(
                         self.optimizers[1], cfg.lr_warmup_steps, num_batches
                     ),
                 ]
-            case "signum":
-                from schedulefree import ScheduleFreeWrapper
+        elif cfg.optimizer == "signum":
+            from schedulefree import ScheduleFreeWrapper
 
-                pgs = [
-                    dict(
-                        params=sae.parameters(),
-                        lr=cfg.lr or 5e-3 / (sae.num_latents / (2**14)) ** 0.5,
-                    )
-                    for sae in self.saes.values()
-                ]
-                lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
+            pgs = [
+                dict(
+                    params=sae.parameters(),
+                    lr=cfg.lr or 5e-3 / (sae.num_latents / (2**14)) ** 0.5,
+                )
+                for sae in self.saes.values()
+            ]
+            lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
 
-                opt = ScheduleFreeWrapper(SignSGD(pgs), momentum=0.95)
-                opt.train()
+            opt = ScheduleFreeWrapper(SignSGD(pgs), momentum=0.95)
+            opt.train()
 
-                self.optimizers = [opt]
-                self.lr_schedulers = []
-            case other:
-                raise ValueError(f"Unknown optimizer '{other}'")
+            self.optimizers = [opt]
+            self.lr_schedulers = []
+        else:
+            raise ValueError(f"Unknown optimizer '{cfg.optimizer}'")
 
         print(f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}")
         self.global_step = 0
@@ -240,18 +240,44 @@ class Trainer:
 
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
         ddp = dist.is_initialized() and not self.cfg.distribute_modules
+        
+        # logger
+        save_path = os.path.join(self.cfg.save_dir, self.cfg.run_name or "unnamed")
+        os.makedirs(save_path, exist_ok=True)
+        log_file_path = os.path.join(save_path, "train.log")
+        logger = logging.getLogger("train_logger")
+        logger.setLevel(logging.INFO)
+        fh = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fmt = logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+
+        # logger
+        save_path = os.path.join(self.cfg.save_dir, self.cfg.run_name or "unnamed")
+        os.makedirs(save_path, exist_ok=True)
+        log_file_path = os.path.join(save_path, "train.log")
+        logger = logging.getLogger("train_logger")
+        logger.setLevel(logging.INFO)
+        fh = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fmt = logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
 
         wandb = None
         if self.cfg.log_to_wandb and rank_zero:
             try:
                 import wandb
-
+                
                 wandb.init(
                     entity=os.environ.get("WANDB_ENTITY", None),
                     name=self.cfg.run_name,
                     project=os.environ.get("WANDB_PROJECT", "sparsify"),
                     config=asdict(self.cfg),
                     save_code=True,
+                    mode=os.environ.get("WANDB_UPLOAD", "offline"),
+                    dir=os.path.join("wandb", self.cfg.run_name)
                 )
             except (AttributeError, ImportError):
                 print("Weights & Biases not available, skipping logging.")
@@ -266,6 +292,7 @@ class Trainer:
         print(f"Number of model parameters: {num_model_params:_}")
 
         num_batches = len(self.dataset) // self.cfg.batch_size
+        
         if self.global_step > 0:
             assert hasattr(self.dataset, "select"), "Dataset must implement `select`"
 
@@ -462,26 +489,25 @@ class Trainer:
                 mod.register_forward_hook(hook) for mod in name_to_module.values()
             ]
             try:
-                match self.cfg.loss_fn:
-                    case "ce":
-                        ce = self.model(x, labels=x).loss
-                        ce.div(acc_steps).backward()
+                if self.cfg.loss_fn == "ce":
+                    ce = self.model(x, labels=x).loss
+                    ce.div(acc_steps).backward()
 
-                        avg_ce += float(self.maybe_all_reduce(ce.detach()) / denom)
+                    avg_ce += float(self.maybe_all_reduce(ce.detach()) / denom)
 
-                        avg_losses = avg_ce
-                    case "kl":
-                        dirty_lps = self.model(x).logits.log_softmax(dim=-1)
-                        kl = -torch.sum(clean_probs * dirty_lps, dim=-1).mean()
-                        kl.div(acc_steps).backward()
+                    avg_losses = avg_ce
+                elif self.cfg.loss_fn == "kl":
+                    dirty_lps = self.model(x).logits.log_softmax(dim=-1)
+                    kl = -torch.sum(clean_probs * dirty_lps, dim=-1).mean()
+                    kl.div(acc_steps).backward()
 
-                        avg_kl += float(self.maybe_all_reduce(kl) / denom)
-                        avg_losses = avg_kl
-                    case "fvu":
-                        self.model(x)
-                        avg_losses = dict(avg_fvu)
-                    case other:
-                        raise ValueError(f"Unknown loss function '{other}'")
+                    avg_kl += float(self.maybe_all_reduce(kl) / denom)
+                    avg_losses = avg_kl
+                elif self.cfg.loss_fn == "fvu":
+                    self.model(x)
+                    avg_losses = dict(avg_fvu)
+                else:
+                        raise ValueError(f"Unknown loss function '{self.cfg.loss_fn}'")
             finally:
                 for handle in handles:
                     handle.remove()
@@ -555,7 +581,12 @@ class Trainer:
 
                     if rank_zero:
                         info["k"] = k
+                        log_info = {"step": step, **info}
+                        logger.info(log_info)
 
+                        log_info = {"step": step, **info}
+                        logger.info(log_info)
+                        
                         if wandb is not None:
                             wandb.log(info, step=step)
 
@@ -677,7 +708,7 @@ class Trainer:
         if dist.is_initialized():
             dist.barrier()
 
-    def save_best(self, avg_loss: float | dict[str, float]):
+    def save_best(self, avg_loss: Union[float, dict[str, float]]):
         """Save individual sparse coders to disk if they have the lowest loss."""
         base_path = f'{self.cfg.save_dir}/{self.cfg.run_name or "unnamed"}/best'
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0

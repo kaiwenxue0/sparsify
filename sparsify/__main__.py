@@ -1,4 +1,5 @@
 import os
+from typing import Union
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from datetime import timedelta
@@ -43,16 +44,16 @@ class RunConfig(TrainConfig):
 
     # Use a dummy encoding function to prevent the token from being saved
     # to disk in plain text
-    hf_token: str | None = field(default=None, encoding_fn=lambda _: None)
+    hf_token: Union[str] = field(default=None, encoding_fn=lambda _: None)
     """Huggingface API token for downloading models."""
 
-    revision: str | None = None
+    revision: Union[str] = None
     """Model revision to use for training."""
 
     load_in_8bit: bool = False
     """Load the model in 8-bit mode."""
 
-    max_examples: int | None = None
+    max_examples: Union[int] = None
     """Maximum number of examples to use for training."""
 
     resume: bool = False
@@ -72,7 +73,7 @@ class RunConfig(TrainConfig):
 
 def load_artifacts(
     args: RunConfig, rank: int
-) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
+) -> tuple[PreTrainedModel, Union[Dataset, MemmapDataset]]:
     if args.load_in_8bit:
         dtype = torch.float16
     elif torch.cuda.is_bf16_supported():
@@ -123,6 +124,7 @@ def load_artifacts(
                 max_seq_len=args.ctx_len,
                 num_proc=args.data_preprocessing_num_proc,
                 text_key=args.text_column,
+                cache_dir=os.path.join(args.dataset, args.split, "tokenized.arrow"),
             )
         else:
             print("Dataset already tokenized; skipping tokenization.")
@@ -148,7 +150,7 @@ def run():
         # Increase the default timeout in order to account for slow downloads
         # and data preprocessing on the main rank
         dist.init_process_group(
-            "nccl", device_id=torch.device(rank), timeout=timedelta(weeks=1)
+            "nccl", timeout=timedelta(weeks=1)
         )
 
         if rank == 0:
