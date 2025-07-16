@@ -66,15 +66,16 @@ class FusedEncoder(torch.autograd.Function):
         # --- Grad w.r.t. weight ---
         if ctx.needs_input_grad[1]:
             grad_weight = torch.zeros_like(weight)
-            # Compute contributions from each top-k element:
-            # computed as grad_values * input for each top-k location.
-            contributions = grad_values.unsqueeze(2) * input.unsqueeze(1)
-            _, _, D = contributions.shape
-            # Flatten contributions to shape (N*k, D)
-            contributions = contributions.reshape(-1, D)
-
-            # Accumulate contributions into the correct rows of grad_weight.
-            grad_weight.index_add_(0, indices.flatten(), contributions.type_as(weight))
+            B, K = grad_values.shape
+            D = input.shape[1]
+            chunk_size = K 
+            for i in range(0, K, chunk_size):
+                grad_chunk = grad_values[:, i:i+chunk_size]             # [B, C]
+                indices_chunk = indices[:, i:i+chunk_size]              # [B, C]
+                contrib_chunk = grad_chunk.unsqueeze(2) * input.unsqueeze(1)  # [B, C, D]
+                contrib_chunk = contrib_chunk.reshape(-1, D)            # [B*C, D]
+                indices_flat = indices_chunk.reshape(-1)                # [B*C]
+                grad_weight.index_add_(0, indices_flat, contrib_chunk.type_as(weight))
 
         # --- Grad w.r.t. bias ---
         if bias is not None and ctx.needs_input_grad[2]:
