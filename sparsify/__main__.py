@@ -20,6 +20,20 @@ from transformers import (
 from .data import MemmapDataset, chunk_and_tokenize
 from .trainer import TrainConfig, Trainer
 
+from datetime import datetime
+
+
+def trace_handler(prof: torch.profiler.profile):
+   # 获取时间用于文件命名
+   timestamp = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+   file_name = f"visual_mem_{timestamp}"
+
+   # 导出tracing格式的profiling
+   prof.export_chrome_trace(f"{file_name}.json")
+
+   # 导出mem消耗可视化数据
+   prof.export_memory_timeline(f"{file_name}.html", device="cuda:0")
+
 
 @dataclass
 class RunConfig(TrainConfig):
@@ -134,6 +148,8 @@ def load_artifacts(
         if limit := args.max_examples:
             dataset = dataset.select(range(limit))
 
+        print("len(dataset): ", len(dataset))
+
     return model, dataset
 
 
@@ -175,6 +191,7 @@ def run():
             # Drop examples that are indivisible across processes to prevent deadlock
             remainder_examples = len(dataset) % dist.get_world_size()
             dataset = dataset.select(range(len(dataset) - remainder_examples))
+            print("len(dataset): ", len(dataset))
 
         print(f"Training on '{args.dataset}' (split '{args.split}')")
         print(f"Storing model weights in {model.dtype}")
@@ -189,8 +206,15 @@ def run():
                     f"{args.finetune}/{name}/sae.safetensors",
                     device=str(model.device),
                 )
-
-        trainer.fit()
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(wait=0, warmup=1, active=6, repeat=1),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+            on_trace_ready=trace_handler,
+        ) as prof:
+            trainer.fit(prof)
 
 
 if __name__ == "__main__":

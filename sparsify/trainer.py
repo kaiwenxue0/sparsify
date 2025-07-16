@@ -24,6 +24,7 @@ from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder
 from .utils import get_layer_list, resolve_widths, set_submodule
 import logging
+from torch.autograd.profiler import record_function
 
 
 class Trainer:
@@ -232,7 +233,7 @@ class Trainer:
         progress = self.global_step / self.cfg.k_decay_steps
         return round(self.initial_k * (1 - progress) + self.final_k * progress)
 
-    def fit(self):
+    def fit(self, prof):
         # Use Tensor Cores even for fp32 matmuls
         torch.set_float32_matmul_precision("high")
 
@@ -437,16 +438,18 @@ class Trainer:
                 )
 
             # Do a "local" backward pass if we're not training end-to-end
-            loss = (
-                out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
-            )
-            loss.div(acc_steps).backward()
+            with record_function("## backward ##"):
+                loss = (
+                    out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
+                )
+                loss.div(acc_steps).backward()
 
         k = self.get_current_k()
         for name, sae in self.saes.items():
             sae.cfg.k = k
 
         for batch in dl:
+            prof.step()
             x = batch["input_ids"].to(device)
 
             if not maybe_wrapped:
@@ -474,33 +477,34 @@ class Trainer:
             )
 
             # Forward pass on the model to get the next batch of activations
-            handles = [
-                mod.register_forward_hook(hook) for mod in name_to_module.values()
-            ]
-            try:
-                match self.cfg.loss_fn:
-                    case "ce":
-                        ce = self.model(x, labels=x).loss
-                        ce.div(acc_steps).backward()
+            with record_function("## forward ##"): 
+                handles = [
+                    mod.register_forward_hook(hook) for mod in name_to_module.values()
+                ]
+                try:
+                    match self.cfg.loss_fn:
+                        case "ce":
+                            ce = self.model(x, labels=x).loss
+                            ce.div(acc_steps).backward()
 
-                        avg_ce += float(self.maybe_all_reduce(ce.detach()) / denom)
+                            avg_ce += float(self.maybe_all_reduce(ce.detach()) / denom)
 
-                        avg_losses = avg_ce
-                    case "kl":
-                        dirty_lps = self.model(x).logits.log_softmax(dim=-1)
-                        kl = -torch.sum(clean_probs * dirty_lps, dim=-1).mean()
-                        kl.div(acc_steps).backward()
+                            avg_losses = avg_ce
+                        case "kl":
+                            dirty_lps = self.model(x).logits.log_softmax(dim=-1)
+                            kl = -torch.sum(clean_probs * dirty_lps, dim=-1).mean()
+                            kl.div(acc_steps).backward()
 
-                        avg_kl += float(self.maybe_all_reduce(kl) / denom)
-                        avg_losses = avg_kl
-                    case "fvu":
-                        self.model(x)
-                        avg_losses = dict(avg_fvu)
-                    case other:
-                        raise ValueError(f"Unknown loss function '{other}'")
-            finally:
-                for handle in handles:
-                    handle.remove()
+                            avg_kl += float(self.maybe_all_reduce(kl) / denom)
+                            avg_losses = avg_kl
+                        case "fvu":
+                            self.model(x)
+                            avg_losses = dict(avg_fvu)
+                        case other:
+                            raise ValueError(f"Unknown loss function '{other}'")
+                finally:
+                    for handle in handles:
+                        handle.remove()
 
             # Check if we need to actually do a training step
             step, substep = divmod(self.global_step + 1, self.cfg.grad_acc_steps)
@@ -509,9 +513,10 @@ class Trainer:
                     for sae in self.saes.values():
                         sae.remove_gradient_parallel_to_decoder_directions()
 
-                for optimizer in self.optimizers:
-                    optimizer.step()
-                    optimizer.zero_grad()
+                with record_function("## optimizer ##"):
+                    for optimizer in self.optimizers:
+                        optimizer.step()
+                        optimizer.zero_grad()
 
                 for scheduler in self.lr_schedulers:
                     scheduler.step()
