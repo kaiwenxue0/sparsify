@@ -13,6 +13,7 @@ from torch import Tensor, nn
 from .config import SparseCoderConfig
 from .fused_encoder import EncoderOutput, fused_encoder
 from .utils import decoder_impl
+from typing import Union
 
 
 class ForwardOutput(NamedTuple):
@@ -39,8 +40,8 @@ class SparseCoder(nn.Module):
         self,
         d_in: int,
         cfg: SparseCoderConfig,
-        device: str | torch.device = "cpu",
-        dtype: torch.dtype | None = None,
+        device: Union[str, torch.device] = "cpu",
+        dtype: Union[torch.dtype] = None,
         *,
         decoder: bool = True,
     ):
@@ -76,11 +77,11 @@ class SparseCoder(nn.Module):
     def load_many(
         name: str,
         local: bool = False,
-        layers: list[str] | None = None,
-        device: str | torch.device = "cpu",
+        layers: list[str] = None,
+        device: Union[str, torch.device] = "cpu",
         *,
         decoder: bool = True,
-        pattern: str | None = None,
+        pattern: Union[str] = None,
     ) -> dict[str, "SparseCoder"]:
         """Load sparse coders for multiple hookpoints on a single model and dataset."""
         pattern = pattern + "/*" if pattern is not None else None
@@ -109,8 +110,8 @@ class SparseCoder(nn.Module):
     @staticmethod
     def load_from_hub(
         name: str,
-        hookpoint: str | None = None,
-        device: str | torch.device = "cpu",
+        hookpoint: Union[str] = None,
+        device: Union[str, torch.device] = "cpu",
         *,
         decoder: bool = True,
     ) -> "SparseCoder":
@@ -132,8 +133,8 @@ class SparseCoder(nn.Module):
 
     @staticmethod
     def load_from_disk(
-        path: Path | str,
-        device: str | torch.device = "cpu",
+        path: Union[Path, str],
+        device: Union[str, torch.device] = "cpu",
         *,
         decoder: bool = True,
     ) -> "SparseCoder":
@@ -154,7 +155,7 @@ class SparseCoder(nn.Module):
         )
         return sae
 
-    def save_to_disk(self, path: Path | str):
+    def save_to_disk(self, path: Union[Path, str]):
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
@@ -198,7 +199,7 @@ class SparseCoder(nn.Module):
         enabled=torch.cuda.is_bf16_supported(),
     )
     def forward(
-        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+        self, x: Tensor, y: Union[Tensor] = None, *, dead_mask: Union[Tensor] = None
     ) -> ForwardOutput:
         top_acts, top_indices, pre_acts = self.encode(x)
 
