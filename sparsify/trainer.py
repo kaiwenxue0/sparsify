@@ -23,7 +23,7 @@ from .data import MemmapDataset
 from .muon import Muon
 from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder
-from .utils import get_layer_list, resolve_widths, set_submodule
+from .utils import get_layer_list, resolve_widths, set_submodule, forward_process
 import logging
 
 class Trainer:
@@ -176,7 +176,7 @@ class Trainer:
 
         self.best_loss = (
             {name: float("inf") for name in self.local_hookpoints()}
-            if self.cfg.loss_fn == "fvu"
+            if self.cfg.loss_fn in ["fvu", "fvu_mdm"]
             else float("inf")
         )
 
@@ -333,7 +333,7 @@ class Trainer:
         avg_kl = 0.0
         avg_losses = (
             {name: float("inf") for name in self.local_hookpoints()}
-            if self.cfg.loss_fn == "fvu"
+            if self.cfg.loss_fn == ["fvu", "fvu_mdm"]
             else float("inf")
         )
 
@@ -506,8 +506,14 @@ class Trainer:
                 elif self.cfg.loss_fn == "fvu":
                     self.model(x)
                     avg_losses = dict(avg_fvu)
+                elif self.cfg.loss_fn == "fvu_mdm":
+                    # before: x = batch["input_ids"].to(device)
+                    # before in SMDM: input_ids = train_data[:, 0 : model.config.block_size].contiguous()
+                    noisy_input, mask_indices, p_mask = forward_process(x)
+                    self.model(noisy_input)
+                    avg_losses = dict(avg_fvu)
                 else:
-                        raise ValueError(f"Unknown loss function '{self.cfg.loss_fn}'")
+                    raise ValueError(f"Unknown loss function '{self.cfg.loss_fn}'")
             finally:
                 for handle in handles:
                     handle.remove()
@@ -584,8 +590,6 @@ class Trainer:
                         log_info = {"step": step, **info}
                         logger.info(log_info)
 
-                        log_info = {"step": step, **info}
-                        logger.info(log_info)
                         
                         if wandb is not None:
                             wandb.log(info, step=step)

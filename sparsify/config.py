@@ -59,6 +59,7 @@ class TrainConfig(Serializable):
 
     - `ce`: Cross-entropy loss of the final model logits.
     - `fvu`: Fraction of variance explained.
+    - `fvu_mdm`: Fraction of variance explained with MDM.
     - `kl`: KL divergence of the final model logits w.r.t. the original logits.
     """
 
