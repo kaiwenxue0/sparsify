@@ -82,7 +82,7 @@ def load_artifacts(
         dtype = "auto"
 
     # End-to-end training requires a model with a causal LM head
-    model_cls = AutoModel if args.loss_fn == "fvu" else AutoModelForCausalLM
+    model_cls = AutoModel if args.loss_fn in ["fvu", "fvu_mdm"] else AutoModelForCausalLM
     model = model_cls.from_pretrained(
         args.model,
         device_map={"": f"cuda:{rank}"},
@@ -94,6 +94,7 @@ def load_artifacts(
         revision=args.revision,
         torch_dtype=dtype,
         token=args.hf_token,
+        trust_remote_code=True
     )
 
     # For memmap-style datasets
@@ -124,7 +125,7 @@ def load_artifacts(
                 max_seq_len=args.ctx_len,
                 num_proc=args.data_preprocessing_num_proc,
                 text_key=args.text_column,
-                cache_dir=os.path.join(args.dataset, args.split, "tokenized.arrow"),
+                cache_dir=os.path.join(args.dataset, args.model.split("hub/")[1].split("/")[0], args.split, str(args.ctx_len), "tokenized.arrow"),
             )
         else:
             print("Dataset already tokenized; skipping tokenization.")

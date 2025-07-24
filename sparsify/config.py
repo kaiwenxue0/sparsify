@@ -54,7 +54,7 @@ class TrainConfig(Serializable):
     micro_acc_steps: int = 1
     """Chunk the activations into this number of microbatches for training."""
 
-    loss_fn: Literal["ce", "fvu", "kl"] = "fvu"
+    loss_fn: Literal["ce", "fvu", "kl", "fvu_mdm"] = "fvu"
     """Loss function to use for training the sparse coders.
 
     - `ce`: Cross-entropy loss of the final model logits.
@@ -95,6 +95,9 @@ class TrainConfig(Serializable):
 
     layer_stride: int = 1
     """Stride between layers to train sparse coders on."""
+
+    layer_start: int = 0
+    """Start layer index to train sparse coders on."""
 
     distribute_modules: bool = False
     """Store one copy of each sparse coder, instead of copying them across devices."""

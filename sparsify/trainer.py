@@ -57,7 +57,7 @@ class Trainer:
             layers_name, _ = get_layer_list(model)
             cfg.hookpoints = [f"{layers_name}.{i}" for i in cfg.layers]
 
-        cfg.hookpoints = cfg.hookpoints[:: cfg.layer_stride]
+        cfg.hookpoints = cfg.hookpoints[cfg.layer_start::cfg.layer_stride]
 
         self.cfg = cfg
         self.dataset = dataset
@@ -265,19 +265,35 @@ class Trainer:
         fh.setFormatter(fmt)
         logger.addHandler(fh)
 
+
         wandb = None
         if self.cfg.log_to_wandb and rank_zero:
             try:
                 import wandb
                 
+                wandb_entity = os.environ.get("WANDB_ENTITY", None)
+                wandb_project = os.environ.get("WANDB_PROJECT", "sparsify")
+                wandb_mode = os.environ.get("WANDB_UPLOAD", "offline")
+                wandb_run_name = self.cfg.run_name
+                wandb_dir = os.path.join("wandb", wandb_run_name)
+                wandb_config = asdict(self.cfg)
+                
+                logger.info("Initializing Weights & Biases run with the following configuration:")
+                logger.info(f"WANDB Entity   : {wandb_entity}")
+                logger.info(f"WANDB Project  : {wandb_project}")
+                logger.info(f"WANDB Run Name : {wandb_run_name}")
+                logger.info(f"WANDB Mode     : {wandb_mode}")
+                logger.info(f"WANDB Save Dir : {wandb_dir}")
+                logger.info(f"WANDB Config   : {wandb_config}")
+
                 wandb.init(
-                    entity=os.environ.get("WANDB_ENTITY", None),
-                    name=self.cfg.run_name,
-                    project=os.environ.get("WANDB_PROJECT", "sparsify"),
-                    config=asdict(self.cfg),
+                    entity=wandb_entity,
+                    name=wandb_run_name,
+                    project=wandb_project,
+                    config=wandb_config,
                     save_code=True,
-                    mode=os.environ.get("WANDB_UPLOAD", "offline"),
-                    dir=os.path.join("wandb", self.cfg.run_name)
+                    mode=wandb_mode,
+                    dir=wandb_dir,
                 )
             except (AttributeError, ImportError):
                 print("Weights & Biases not available, skipping logging.")
@@ -572,7 +588,7 @@ class Trainer:
 
                         ratio = mask.mean(dtype=torch.float32).item()
                         info.update({f"dead_pct/{name}": ratio})
-                        if self.cfg.loss_fn == "fvu":
+                        if self.cfg.loss_fn in ["fvu", "fvu_mdm"]:
                             info[f"fvu/{name}"] = avg_fvu[name]
 
                         if self.cfg.auxk_alpha > 0:
