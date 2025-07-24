@@ -225,11 +225,6 @@ class SparseCoder(nn.Module):
         # Used as a denominator for putting everything on a reasonable scale
         total_variance = (y - y.mean(0)).pow(2).sum()
 
-        if total_variance == 0 or torch.isnan(total_variance) or torch.isinf(total_variance):
-            print(f"[RANK {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}] "
-                    f"BAD BATCH! y.shape={y.shape}  "
-                    f"unique_rows={torch.unique(y, dim=0).shape[0]}")
-            # raise ValueError(f"total_variance degenerated to {total_variance.item()}")
         if total_variance < eps:
             # If the total variance is too small, we skip the loss computation
             auxk_loss = sae_out.new_tensor(0.0, requires_grad=True)
