@@ -253,19 +253,6 @@ class Trainer:
         fh.setFormatter(fmt)
         logger.addHandler(fh)
 
-        # logger
-        save_path = os.path.join(self.cfg.save_dir, self.cfg.run_name or "unnamed")
-        os.makedirs(save_path, exist_ok=True)
-        log_file_path = os.path.join(save_path, "train.log")
-        logger = logging.getLogger("train_logger")
-        logger.setLevel(logging.INFO)
-        fh = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
-        fh.setLevel(logging.INFO)
-        fmt = logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-
-
         wandb = None
         if self.cfg.log_to_wandb and rank_zero:
             try:
@@ -473,6 +460,30 @@ class Trainer:
         for name, sae in self.saes.items():
             sae.cfg.k = k
 
+        def nan_hook(name):
+            def _flatten(item):
+                """递归 yield 所有 Tensor。支持 Tensor / dict / (list, tuple, NamedTuple)。"""
+                if isinstance(item, torch.Tensor):
+                    yield item
+                elif isinstance(item, dict):
+                    for v in item.values():
+                        yield from _flatten(v)
+                elif isinstance(item, (list, tuple)):
+                    for v in item:
+                        yield from _flatten(v)
+                # 其他类型（int、str …）忽略
+
+            def make_hook(name: str):
+                def hook(module, inputs, output):
+                    for t in _flatten(inputs) :
+                        if torch.isnan(t).any() or torch.isinf(t).any():
+                            raise RuntimeError(f"NaN/Inf detected in inputs of {name}")
+                    for t in _flatten(output):
+                        if torch.isnan(t).any() or torch.isinf(t).any():
+                            raise RuntimeError(f"NaN/Inf detected in outputs of {name}")
+                return hook
+            return make_hook(name)
+
         for batch in dl:
             x = batch["input_ids"].to(device)
 
@@ -504,6 +515,16 @@ class Trainer:
             handles = [
                 mod.register_forward_hook(hook) for mod in name_to_module.values()
             ]
+
+            # add nan hook
+            # TODO maybe not wrk because the actually worker is maybe_wrapped
+            for n, m in self.saes.items():
+                for n_module, m in m.named_modules():
+                    m.register_forward_hook(nan_hook(n + "/" + n_module))
+
+            for n, m in self.model.named_modules():
+                m.register_forward_hook(nan_hook(n))
+
             try:
                 if self.cfg.loss_fn == "ce":
                     ce = self.model(x, labels=x).loss
@@ -526,6 +547,8 @@ class Trainer:
                     # before: x = batch["input_ids"].to(device)
                     # before in SMDM: input_ids = train_data[:, 0 : model.config.block_size].contiguous()
                     noisy_input, mask_indices, p_mask = forward_process(x)
+                    for noisy_input_one in noisy_input:
+                        print("unique_tokens:", noisy_input_one.unique().shape[0])
                     self.model(noisy_input)
                     avg_losses = dict(avg_fvu)
                 else:
