@@ -231,6 +231,7 @@ class SparseCoder(nn.Module):
                     f"unique_rows={torch.unique(y, dim=0).shape[0]}")
             # raise ValueError(f"total_variance degenerated to {total_variance.item()}")
         if total_variance < eps:
+            # If the total variance is too small, we skip the loss computation
             auxk_loss = sae_out.new_tensor(0.0, requires_grad=True)
             fvu = sae_out.new_tensor(0.0, requires_grad=True)
             multi_topk_fvu = sae_out.new_tensor(0.0, requires_grad=True)

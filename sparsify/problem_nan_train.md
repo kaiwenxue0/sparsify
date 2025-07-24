@@ -141,6 +141,7 @@ add unique_row check code
 ## result
 ```bash
 unique_tokens: 1
+# fequency: 2/100 steps
 ```
 
 ## solve
