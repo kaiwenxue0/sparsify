@@ -231,9 +231,9 @@ class SparseCoder(nn.Module):
                     f"unique_rows={torch.unique(y, dim=0).shape[0]}")
             # raise ValueError(f"total_variance degenerated to {total_variance.item()}")
         if total_variance < eps:
-            auxk_loss = sae_out.new_tensor(0.0)
-            fvu = sae_out.new_tensor(0.0)
-            multi_topk_fvu = sae_out.new_tensor(0.0)
+            auxk_loss = sae_out.new_tensor(0.0, requires_grad=True)
+            fvu = sae_out.new_tensor(0.0, requires_grad=True)
+            multi_topk_fvu = sae_out.new_tensor(0.0, requires_grad=True)
         else:
             # Second decoder pass for AuxK loss
             if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:

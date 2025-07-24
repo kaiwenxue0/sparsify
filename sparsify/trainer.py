@@ -547,8 +547,6 @@ class Trainer:
                     # before: x = batch["input_ids"].to(device)
                     # before in SMDM: input_ids = train_data[:, 0 : model.config.block_size].contiguous()
                     noisy_input, mask_indices, p_mask = forward_process(x)
-                    for noisy_input_one in noisy_input:
-                        print("unique_tokens:", noisy_input_one.unique().shape[0])
                     self.model(noisy_input)
                     avg_losses = dict(avg_fvu)
                 else:
