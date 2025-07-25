@@ -51,6 +51,11 @@ class TrainConfig(Serializable):
     grad_acc_steps: int = 1
     """Number of steps over which to accumulate gradients."""
 
+    total_tokens: int = 9_000_000_000
+    """Total number of training steps."""
+
+    num_workers_ratio: int = 4
+
     micro_acc_steps: int = 1
     """Chunk the activations into this number of microbatches for training."""
 

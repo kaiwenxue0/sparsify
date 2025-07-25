@@ -88,7 +88,7 @@ class Trainer:
                 )
 
         assert isinstance(dataset, Sized)
-        num_batches = len(dataset) // cfg.batch_size
+        num_batches = len(dataset) // (cfg.batch_size * cfg.grad_acc_steps)
 
         if cfg.optimizer == "adam":
             try:
@@ -294,7 +294,7 @@ class Trainer:
         print(f"Number of SAE parameters: {num_sae_params:_}")
         print(f"Number of model parameters: {num_model_params:_}")
 
-        num_batches = len(self.dataset) // self.cfg.batch_size
+        num_batches = len(self.dataset) // (self.cfg.batch_size * self.cfg.grad_acc_steps)
         
         if self.global_step > 0:
             assert hasattr(self.dataset, "select"), "Dataset must implement `select`"
@@ -311,11 +311,13 @@ class Trainer:
             # NOTE: We do not shuffle here for reproducibility; the dataset should
             # be shuffled before passing it to the trainer.
             shuffle=False,
+            num_workers=self.cfg.num_workers_ratio * dist.get_world_size(),
+            pin_memory=True,
         )
         pbar = tqdm(
             desc="Training",
             disable=not rank_zero,
-            initial=self.global_step,
+            initial=(self.global_step + 1) // self.cfg.grad_acc_steps,
             total=num_batches,
         )
 
@@ -462,7 +464,6 @@ class Trainer:
 
         for batch in dl:
             x = batch["input_ids"].to(device)
-
             if not maybe_wrapped:
                 # Wrap the SAEs with Distributed Data Parallel. We have to do this
                 # after we set the decoder bias, otherwise DDP will not register
@@ -486,12 +487,10 @@ class Trainer:
                 if self.cfg.loss_fn == "kl"
                 else None
             )
-
             # Forward pass on the model to get the next batch of activations
             handles = [
                 mod.register_forward_hook(hook) for mod in name_to_module.values()
             ]
-
             try:
                 if self.cfg.loss_fn == "ce":
                     ce = self.model(x, labels=x).loss
@@ -603,9 +602,8 @@ class Trainer:
                 avg_multi_topk_fvu.clear()
                 avg_ce = 0.0
                 avg_kl = 0.0
-
+                pbar.update()
             self.global_step += 1
-            pbar.update()
 
         self.save()
         if self.cfg.save_best:
