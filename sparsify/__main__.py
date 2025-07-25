@@ -53,8 +53,6 @@ class RunConfig(TrainConfig):
     load_in_8bit: bool = False
     """Load the model in 8-bit mode."""
 
-    max_examples: Union[int] = None
-    """Maximum number of examples to use for training."""
 
     resume: bool = False
     """Whether to try resuming from the checkpoint present at `checkpoints/run_name`."""
@@ -99,7 +97,7 @@ def load_artifacts(
 
     # For memmap-style datasets
     if args.dataset.endswith(".bin"):
-        dataset = MemmapDataset(args.dataset, args.ctx_len, args.max_examples)
+        dataset = MemmapDataset(args.dataset, args.ctx_len, args.total_tokens // args.ctx_len)
     else:
         # For Huggingface datasets
         try:
@@ -134,7 +132,7 @@ def load_artifacts(
         dataset = dataset.shuffle(args.shuffle_seed)
 
         dataset = dataset.with_format("torch")
-        if limit := args.max_examples:
+        if limit := args.total_tokens // args.ctx_len:
             dataset = dataset.select(range(limit))
 
     return model, dataset
