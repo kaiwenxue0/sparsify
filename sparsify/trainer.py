@@ -44,7 +44,6 @@ class Trainer:
             for name, _ in model.base_model.named_modules():
                 if any(fnmatchcase(name, pat) for pat in cfg.hookpoints):
                     raw_hookpoints.append(name)
-
             # Natural sort to impose a consistent order
             cfg.hookpoints = natsorted(raw_hookpoints)
         else:
@@ -189,6 +188,7 @@ class Trainer:
             f"{path}/state.pt", map_location=device, weights_only=True
         )
         self.global_step = train_state["global_step"]
+
 
         for file in glob(f"{path}/rank_*_state.pt"):
             rank_state = torch.load(file, map_location=device, weights_only=True)

@@ -66,7 +66,8 @@ class RunConfig(TrainConfig):
     """Random seed for shuffling the dataset."""
 
     data_preprocessing_num_proc: int = field(
-        default_factory=lambda: cpu_count() // 2,
+        # default_factory=lambda: cpu_count() // 2,
+        default_factory=lambda: 48,
     )
     """Number of processes to use for preprocessing data"""
 
@@ -131,7 +132,7 @@ def load_artifacts(
                 max_seq_len=args.ctx_len,
                 num_proc=args.data_preprocessing_num_proc,
                 text_key=args.text_column,
-                cache_dir=os.path.join(args.dataset, args.split, "tokenized.arrow"),
+                cache_dir=os.path.join(args.dataset, "tokenizer=" + args.model.split("/")[-1], "split=" + args.split, "ctx_len=" + str(args.ctx_len), "num_proc=" + str(args.data_preprocessing_num_proc),  "tokenized.arrow"),
             )
         else:
             print("Dataset already tokenized; skipping tokenization.")
@@ -193,6 +194,7 @@ def run():
             trainer.load_state(f"checkpoints/{args.run_name}" or "checkpoints/unnamed")
         elif args.finetune:
             for name, sae in trainer.saes.items():
+                print(f"Loading {name} from {args.finetune}/{name}/sae.safetensors")
                 load_model(
                     sae,
                     f"{args.finetune}/{name}/sae.safetensors",
