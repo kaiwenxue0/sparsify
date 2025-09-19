@@ -15,6 +15,10 @@ from .fused_encoder import EncoderOutput, fused_encoder
 from .utils import decoder_impl
 from typing import Union
 
+import torch, math, contextlib
+torch.autograd.set_detect_anomaly(True)   # 会在梯度计算遇到 inf/NaN 时抛出堆栈
+torch.backends.cuda.matmul.allow_tf32 = False  # 避免 TF32 带来的额外数值误差
+
 
 class ForwardOutput(NamedTuple):
     sae_out: Tensor
@@ -199,7 +203,7 @@ class SparseCoder(nn.Module):
         enabled=torch.cuda.is_bf16_supported(),
     )
     def forward(
-        self, x: Tensor, y: Union[Tensor] = None, *, dead_mask: Union[Tensor] = None
+        self, x: Tensor, y: Union[Tensor] = None, *, dead_mask: Union[Tensor] = None, eps = 1e-12
     ) -> ForwardOutput:
         top_acts, top_indices, pre_acts = self.encode(x)
 
@@ -215,42 +219,52 @@ class SparseCoder(nn.Module):
         # Compute the residual
         e = y - sae_out
 
+        if torch.isinf(e).any() or torch.isnan(e).any():
+            raise ValueError("NaN/Inf in residual e")
+
         # Used as a denominator for putting everything on a reasonable scale
         total_variance = (y - y.mean(0)).pow(2).sum()
 
-        # Second decoder pass for AuxK loss
-        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
-            # Heuristic from Appendix B.1 in the paper
-            k_aux = y.shape[-1] // 2
-
-            # Reduce the scale of the loss if there are a small number of dead latents
-            scale = min(num_dead / k_aux, 1.0)
-            k_aux = min(k_aux, num_dead)
-
-            # Don't include living latents in this loss
-            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
-
-            # Top-k dead latents
-            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
-
-            # Encourage the top ~50% of dead latents to predict the residual of the
-            # top k living latents
-            e_hat = self.decode(auxk_acts, auxk_indices)
-            auxk_loss = (e_hat - e.detach()).pow(2).sum()
-            auxk_loss = scale * auxk_loss / total_variance
+        if total_variance < eps:
+            # If the total variance is too small, we skip the loss computation
+            auxk_loss = sae_out.new_tensor(0.0, requires_grad=True)
+            fvu = sae_out.new_tensor(0.0, requires_grad=True)
+            multi_topk_fvu = sae_out.new_tensor(0.0, requires_grad=True)
         else:
-            auxk_loss = sae_out.new_tensor(0.0)
+            # Second decoder pass for AuxK loss
+            if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+                # Heuristic from Appendix B.1 in the paper
+                k_aux = y.shape[-1] // 2
 
-        l2_loss = e.pow(2).sum()
-        fvu = l2_loss / total_variance
+                # Reduce the scale of the loss if there are a small number of dead latents
+                scale = min(num_dead / k_aux, 1.0)
+                k_aux = min(k_aux, num_dead)
 
-        if self.cfg.multi_topk:
-            top_acts, top_indices = pre_acts.topk(4 * self.cfg.k, sorted=False)
-            sae_out = self.decode(top_acts, top_indices)
+                # Don't include living latents in this loss
+                auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
 
-            multi_topk_fvu = (sae_out - y).pow(2).sum() / total_variance
-        else:
-            multi_topk_fvu = sae_out.new_tensor(0.0)
+                # Top-k dead latents
+                auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+
+                # Encourage the top ~50% of dead latents to predict the residual of the
+                # top k living latents
+                e_hat = self.decode(auxk_acts, auxk_indices)
+                auxk_loss = (e_hat - e.detach()).pow(2).sum()
+                auxk_loss = scale * auxk_loss / total_variance
+            else:
+                auxk_loss = sae_out.new_tensor(0.0)
+
+            l2_loss = e.pow(2).sum()
+                # 视作0方差批，跳过TV归一化 
+                
+            fvu = l2_loss / total_variance
+
+            if self.cfg.multi_topk:
+                top_acts, top_indices = pre_acts.topk(4 * self.cfg.k, sorted=False)
+                sae_out = self.decode(top_acts, top_indices)
+                multi_topk_fvu = (sae_out - y).pow(2).sum() / total_variance
+            else:
+                multi_topk_fvu = sae_out.new_tensor(0.0)
 
         return ForwardOutput(
             sae_out,

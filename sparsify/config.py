@@ -51,14 +51,20 @@ class TrainConfig(Serializable):
     grad_acc_steps: int = 1
     """Number of steps over which to accumulate gradients."""
 
+    total_tokens: int = 9_000_000_000
+    """Total number of training steps."""
+
+    num_workers_ratio: int = 4
+
     micro_acc_steps: int = 1
     """Chunk the activations into this number of microbatches for training."""
 
-    loss_fn: Literal["ce", "fvu", "kl"] = "fvu"
+    loss_fn: Literal["ce", "fvu", "kl", "fvu_mdm"] = "fvu"
     """Loss function to use for training the sparse coders.
 
     - `ce`: Cross-entropy loss of the final model logits.
     - `fvu`: Fraction of variance explained.
+    - `fvu_mdm`: Fraction of variance explained with MDM.
     - `kl`: KL divergence of the final model logits w.r.t. the original logits.
     """
 
@@ -94,6 +100,9 @@ class TrainConfig(Serializable):
 
     layer_stride: int = 1
     """Stride between layers to train sparse coders on."""
+
+    layer_start: int = 0
+    """Start layer index to train sparse coders on."""
 
     distribute_modules: bool = False
     """Store one copy of each sparse coder, instead of copying them across devices."""

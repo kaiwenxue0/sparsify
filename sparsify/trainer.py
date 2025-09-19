@@ -23,7 +23,7 @@ from .data import MemmapDataset
 from .muon import Muon
 from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder
-from .utils import get_layer_list, resolve_widths, set_submodule
+from .utils import get_layer_list, resolve_widths, set_submodule, forward_process
 import logging
 
 class Trainer:
@@ -56,7 +56,7 @@ class Trainer:
             layers_name, _ = get_layer_list(model)
             cfg.hookpoints = [f"{layers_name}.{i}" for i in cfg.layers]
 
-        cfg.hookpoints = cfg.hookpoints[:: cfg.layer_stride]
+        cfg.hookpoints = cfg.hookpoints[cfg.layer_start::cfg.layer_stride]
 
         self.cfg = cfg
         self.dataset = dataset
@@ -87,7 +87,7 @@ class Trainer:
                 )
 
         assert isinstance(dataset, Sized)
-        num_batches = len(dataset) // cfg.batch_size
+        num_batches = len(dataset) // (cfg.batch_size * cfg.grad_acc_steps)
 
         if cfg.optimizer == "adam":
             try:
@@ -175,7 +175,7 @@ class Trainer:
 
         self.best_loss = (
             {name: float("inf") for name in self.local_hookpoints()}
-            if self.cfg.loss_fn == "fvu"
+            if self.cfg.loss_fn in ["fvu", "fvu_mdm"]
             else float("inf")
         )
 
@@ -252,6 +252,18 @@ class Trainer:
         fmt = logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
         fh.setFormatter(fmt)
         logger.addHandler(fh)
+        
+        # logger
+        save_path = os.path.join(self.cfg.save_dir, self.cfg.run_name or "unnamed")
+        os.makedirs(save_path, exist_ok=True)
+        log_file_path = os.path.join(save_path, "train.log")
+        logger = logging.getLogger("train_logger")
+        logger.setLevel(logging.INFO)
+        fh = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fmt = logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
 
 
         wandb = None
@@ -259,14 +271,29 @@ class Trainer:
             try:
                 import wandb
                 
+                wandb_entity = os.environ.get("WANDB_ENTITY", None)
+                wandb_project = os.environ.get("WANDB_PROJECT", "sparsify")
+                wandb_mode = os.environ.get("WANDB_UPLOAD", "offline")
+                wandb_run_name = self.cfg.run_name
+                wandb_dir = os.path.join("wandb", wandb_run_name)
+                wandb_config = asdict(self.cfg)
+                
+                logger.info("Initializing Weights & Biases run with the following configuration:")
+                logger.info(f"WANDB Entity   : {wandb_entity}")
+                logger.info(f"WANDB Project  : {wandb_project}")
+                logger.info(f"WANDB Run Name : {wandb_run_name}")
+                logger.info(f"WANDB Mode     : {wandb_mode}")
+                logger.info(f"WANDB Save Dir : {wandb_dir}")
+                logger.info(f"WANDB Config   : {wandb_config}")
+
                 wandb.init(
-                    entity=os.environ.get("WANDB_ENTITY", None),
-                    name=self.cfg.run_name,
-                    project=os.environ.get("WANDB_PROJECT", "sparsify"),
-                    config=asdict(self.cfg),
+                    entity=wandb_entity,
+                    name=wandb_run_name,
+                    project=wandb_project,
+                    config=wandb_config,
                     save_code=True,
-                    mode=os.environ.get("WANDB_UPLOAD", "offline"),
-                    dir=os.path.join("wandb", self.cfg.run_name)
+                    mode=wandb_mode,
+                    dir=wandb_dir,
                 )
             except (AttributeError, ImportError):
                 print("Weights & Biases not available, skipping logging.")
@@ -280,7 +307,7 @@ class Trainer:
         print(f"Number of SAE parameters: {num_sae_params:_}")
         print(f"Number of model parameters: {num_model_params:_}")
 
-        num_batches = len(self.dataset) // self.cfg.batch_size
+        num_batches = len(self.dataset) // (self.cfg.batch_size * self.cfg.grad_acc_steps)
         
         if self.global_step > 0:
             assert hasattr(self.dataset, "select"), "Dataset must implement `select`"
@@ -297,11 +324,13 @@ class Trainer:
             # NOTE: We do not shuffle here for reproducibility; the dataset should
             # be shuffled before passing it to the trainer.
             shuffle=False,
+            num_workers=self.cfg.num_workers_ratio * dist.get_world_size(),
+            pin_memory=True,
         )
         pbar = tqdm(
             desc="Training",
             disable=not rank_zero,
-            initial=self.global_step,
+            initial=(self.global_step + 1) // self.cfg.grad_acc_steps,
             total=num_batches,
         )
 
@@ -322,7 +351,7 @@ class Trainer:
         avg_kl = 0.0
         avg_losses = (
             {name: float("inf") for name in self.local_hookpoints()}
-            if self.cfg.loss_fn == "fvu"
+            if self.cfg.loss_fn == ["fvu", "fvu_mdm"]
             else float("inf")
         )
 
@@ -448,7 +477,6 @@ class Trainer:
 
         for batch in dl:
             x = batch["input_ids"].to(device)
-
             if not maybe_wrapped:
                 # Wrap the SAEs with Distributed Data Parallel. We have to do this
                 # after we set the decoder bias, otherwise DDP will not register
@@ -472,7 +500,6 @@ class Trainer:
                 if self.cfg.loss_fn == "kl"
                 else None
             )
-
             # Forward pass on the model to get the next batch of activations
             handles = [
                 mod.register_forward_hook(hook) for mod in name_to_module.values()
@@ -495,8 +522,14 @@ class Trainer:
                 elif self.cfg.loss_fn == "fvu":
                     self.model(x)
                     avg_losses = dict(avg_fvu)
+                elif self.cfg.loss_fn == "fvu_mdm":
+                    # before: x = batch["input_ids"].to(device)
+                    # before in SMDM: input_ids = train_data[:, 0 : model.config.block_size].contiguous()
+                    noisy_input, mask_indices, p_mask = forward_process(x)
+                    self.model(noisy_input)
+                    avg_losses = dict(avg_fvu)
                 else:
-                        raise ValueError(f"Unknown loss function '{self.cfg.loss_fn}'")
+                    raise ValueError(f"Unknown loss function '{self.cfg.loss_fn}'")
             finally:
                 for handle in handles:
                     handle.remove()
@@ -555,7 +588,7 @@ class Trainer:
 
                         ratio = mask.mean(dtype=torch.float32).item()
                         info.update({f"dead_pct/{name}": ratio})
-                        if self.cfg.loss_fn == "fvu":
+                        if self.cfg.loss_fn in ["fvu", "fvu_mdm"]:
                             info[f"fvu/{name}"] = avg_fvu[name]
 
                         if self.cfg.auxk_alpha > 0:
@@ -573,8 +606,6 @@ class Trainer:
                         log_info = {"step": step, **info}
                         logger.info(log_info)
 
-                        log_info = {"step": step, **info}
-                        logger.info(log_info)
                         
                         if wandb is not None:
                             wandb.log(info, step=step)
@@ -584,9 +615,8 @@ class Trainer:
                 avg_multi_topk_fvu.clear()
                 avg_ce = 0.0
                 avg_kl = 0.0
-
+                pbar.update()
             self.global_step += 1
-            pbar.update()
 
         self.save()
         if self.cfg.save_best:

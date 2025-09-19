@@ -53,8 +53,6 @@ class RunConfig(TrainConfig):
     load_in_8bit: bool = False
     """Load the model in 8-bit mode."""
 
-    max_examples: Union[int] = None
-    """Maximum number of examples to use for training."""
 
     resume: bool = False
     """Whether to try resuming from the checkpoint present at `checkpoints/run_name`."""
@@ -83,7 +81,7 @@ def load_artifacts(
         dtype = "auto"
 
     # End-to-end training requires a model with a causal LM head
-    model_cls = AutoModel if args.loss_fn == "fvu" else AutoModelForCausalLM
+    model_cls = AutoModel if args.loss_fn in ["fvu", "fvu_mdm"] else AutoModelForCausalLM
     model = model_cls.from_pretrained(
         args.model,
         device_map={"": f"cuda:{rank}"},
@@ -95,11 +93,12 @@ def load_artifacts(
         revision=args.revision,
         torch_dtype=dtype,
         token=args.hf_token,
+        trust_remote_code=True
     )
 
     # For memmap-style datasets
     if args.dataset.endswith(".bin"):
-        dataset = MemmapDataset(args.dataset, args.ctx_len, args.max_examples)
+        dataset = MemmapDataset(args.dataset, args.ctx_len, args.total_tokens // args.ctx_len)
     else:
         # For Huggingface datasets
         if "tiny_shakespeare" in args.dataset:
@@ -141,7 +140,7 @@ def load_artifacts(
         dataset = dataset.shuffle(args.shuffle_seed)
 
         dataset = dataset.with_format("torch")
-        if limit := args.max_examples:
+        if limit := args.total_tokens // args.ctx_len:
             dataset = dataset.select(range(limit))
 
     return model, dataset
